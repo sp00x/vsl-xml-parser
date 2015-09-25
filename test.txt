@@ -1,0 +1,88 @@
+sub OnInitParameters()
+
+	RegisterParameterString("urlHost", "URL host", "flossy.never.no", 100, 4096, "")
+	RegisterParameterString("urlPort", "URL port", "80", 100, 4096, "")
+	RegisterParameterString("urlPath", "URL path", "/~rune/temp/feed/devstory_social1.xml", 100, 4096, "")
+
+	RegisterPushButton("urlDownload", "Download URL", 1)
+	RegisterParameterText("xml", "", 700, 100)
+
+	RegisterParameterBool("xmlIgnoreWhitespace", "Ignore whitespace", false)
+	RegisterParameterBool("xmlIgnoreAdvanced", "Ignore everything but text and element nodes", false)
+	RegisterPushButton("parse", "Parse XML", 2)
+	RegisterPushButton("parseDcsMessages", "Parse DCS messages XML", 3)
+	RegisterParameterText("output", "", 700, 400)
+
+end sub
+
+sub OnExecAction(buttonId As Integer)
+
+	if buttonId = 1 then
+	
+		dim host as string = GetParameterString("urlHost")
+		dim port as integer = CInt(GetParameterString("urlPort"))
+		dim path as string = GetParameterString("urlPath")
+		dim xml as string = DownloadXML(host, port, path)
+		SetParameter("xml", xml)
+	
+	elseif buttonId = 2 then
+	
+		dim doc as XMLNode = ParseXML(GetParameterString("xml"), GetParameterBool("xmlIgnoreWhitespace"), GetParameterBool("xmlIgnoreAdvanced"))
+		SetParameter("output", DumpXMLNode(doc, ""))
+	
+	elseif buttonId = 3 then
+	
+		' parse the document
+		dim doc as XMLNode = ParseXML(GetParameterString("xml"), GetParameterBool("xmlIgnoreWhitespace"), GetParameterBool("xmlIgnoreAdvanced"))
+		
+		' find the <datasource> (document element) node
+		dim ds as XMLNode = FindElement(doc, "datasource")
+		
+		' find all <entry> child nodes of <datasource>
+		dim entries as Array[XMLNode] = FindElements(ds, "entry")
+		
+		' loop over all <entry> nodes to process messages
+		dim out as string = ""
+		for i = entries.LBound to entries.UBound
+		
+			dim entry as XMLNode = entries[i]
+			
+			' get <field name="nickname"> node and flatten it
+			dim nick as string = FlattenElement(FindElement(entry, "field", "name", "nickname"))
+			
+			' get <field name="message"> node and flatten it
+			dim msg as string = FlattenElement(FindElement(entry, "field", "name", "message"))
+			
+			' add to the output
+			out = out & "#" & (i+1) & " (" & nick & ") " & msg & chr(13) & chr(10)			
+		next
+		
+		' set the output text parameter
+		SetParameter("output", out)
+	
+	end if
+
+end sub
+
+function DownloadXML(host as string, port as integer, path as string) as String
+
+	dim xml as string = system.TcpSend(host, port, "GET " & path & " HTTP/1.0\r\nHost: " & host & ":" & port & "\r\n\r\n", 1000)
+
+	' erase http header (this is a bit of a hack)
+	xml.Erase(0, xml.Find("<") - 1)
+	
+	DownloadXML = xml
+	
+end function
+
+sub SetParameter(paramName as string, value as String)
+
+	dim cmd as string = "#" & this.VizId & "*SCRIPT*INSTANCE*" & paramName & " SET"
+	if (value <> "") then
+		cmd = cmd & " " & value
+	end if
+	System.SendCommand(cmd)
+
+end sub
+
+' #include <xml-parser.txt>

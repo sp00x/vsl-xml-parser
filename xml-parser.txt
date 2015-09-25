@@ -1,0 +1,787 @@
+'-------------------------------------------------------------------------------
+'
+' XML DOM-like parser implemented in VSL (Viz3 scripting language)
+'
+' Implemented by Rune Bjerke [rune ÄT never DÖT no] (rune @ Vizrt forums)
+'
+' Version 1.0 - 2015-09-25
+'
+' Copyright © never.no - but you're free to reuse this as long as you
+' leave this notice in, or say hi on the Vizrt forums :P
+'
+' Provided as-is, with no warranties as to if it works properly or not.
+' You're to blame if you use this.
+'
+' See example usage in (test.txt), but basically:
+'
+' 1) use ParseXml(xml, ignoreWhitespace, ignoreAdvanced) to parse the XML
+' 2) use FindElement() or FindElements() to find stuff/navigate
+' 3) use FlattenElement() to get text values
+'
+' Not tested on a very high number of XML file samples, but should deal with
+' the basics.
+'
+' Does not really support:
+'
+' - <!DOCTYPE ..> parsing (but somewhat gracefully deals with it)
+' - Name spaces (.Name will be e.g. ns:foo)
+'
+'-------------------------------------------------------------------------------
+
+structure XmlNode
+
+	' This will be either:
+	' 'document'
+	' 'element'
+	' 'text'
+	' 'whitespace'
+	' 'cdata'
+	' 'comment'
+	' 'processing-instruction'
+	' 'doctype-unparsed'
+	' 'doctype-unparsed-internal'
+	' 'error'
+	Type as String
+	
+	' Element name for Type=element
+	Name as String
+	
+	' Actual value for Type=text|cdata|whitespace|comment (Also set for doctype-*)
+	Value as String
+	
+	' Attributes for Type=element|processing-instruction
+	Attributes as StringMap
+	
+	' Any child nodes
+	Children as Array[XmlNode]
+	
+end structure
+
+function ParseXml(byval xml as String, ignoreWhitespace as boolean, ignoreAdvanced as boolean) as XmlNode
+
+	dim document as XmlNode
+	document.Type = "document"
+	ParseNextXmlNode(xml, document, ignoreWhitespace, ignoreAdvanced)
+	ParseXml = document
+
+end function
+
+sub ParseNextXmlNode(byref xml as String, byref node as XmlNode, ignoreWhitespace as boolean, ignoreAdvanced as boolean)
+
+	dim length as integer = len(xml)
+	dim i as integer = 1
+	dim iterateEscape as integer = 0
+
+	do while (iterateEscape < 99999 and length > 0) 
+
+		'println "-----"
+		'println ""
+		'println "xml is: " & xml
+		'println ""
+
+		dim j as integer = xml.Find("<")
+		'println "< @ " & j
+
+		if (j > -1) then
+		
+			if (j > 0) then
+				' we have some text or white space content
+				dim t as string = xml.GetSubstring(0, j)
+				xml.Erase(0, j)
+				'println "found text(" & j & ") = " & t
+				
+				dim tx as XmlNode
+				tx.Type = "text"
+				tx.Value = XmlUnescape(t)
+				if (IsWhitespace(t)) then
+					tx.Type = "whitespace"
+					if not ignoreWhitespace	then node.Children.Push(tx)				
+				else
+					node.Children.Push(tx)
+				end if
+
+			end if
+			
+			dim ch as string = xml.GetChar(1)
+
+			if (ch = "!") then
+			
+				if (xml.GetSubstring(0, 9) = "<![CDATA[") then
+					' <![CDATA[ .. ]]>
+					dim k as integer = xml.Find("]]>")
+					dim t as string = xml.GetSubstring(9, k-9)
+					xml.Erase(0, k+3)
+					'println "found cdata(" & k & ") = " & t
+					
+					dim cd as XmlNode
+					cd.Type = "cdata"
+					cd.Value = t
+					node.Children.Push(cd)
+					
+				elseif	(xml.GetSubstring(0, 4) = "<!--") then
+				
+					' <!-- .. -->
+					dim k as integer = xml.Find("-->")
+					dim t as string = xml.GetSubstring(4, k-4)
+					xml.Erase(0, k+3)
+					'println "found comment(" & k & ") = " & t
+					
+					dim c as XmlNode
+					c.Type = "comment"
+					c.Value = XmlUnescape(t)
+					if not ignoreAdvanced then node.Children.Push(c)
+					
+				elseif	(xml.GetSubstring(0, 9) = "<!DOCTYPE") then
+
+					' this is all very hack-ish, but we don't support this anyhow..
+
+					' either <!DOCTYPE blah XXX "YYY" "URL" [ .. ]>
+					' or <!DOCTYPE blah XXX "YYY" "URL">				
+					
+					dim dt as XmlNode
+
+					dim e as integer = xml.Find(">") ' end tag
+					dim o as integer = xml.Find("[") ' open inline
+					dim c as integer = xml.Find("]>") ' close inline
+					
+					dim t as string
+					if e > o and c > o then
+						' case 1, most likely from an inline <!ENTITY..>
+						t = xml.GetSubstring(0, c+2)
+						xml.Erase(0, c + 2)
+						dt.Type = "doctype-unparsed-internal"
+					else
+						' case 2, no inline.. [ is from later somewhere
+						t = xml.GetSubstring(0, e+1)
+						xml.Erase(0, e + 1)
+						dt.Type = "doctype-unparsed"
+					end if
+					
+					if not ignoreAdvanced then
+						dt.Value = t
+						node.Children.Push(dt)
+					end if
+					
+				else
+				
+					' SOME ERROR OCCURRED AS WE DONT KNOW HOW TO DEAL WITH THIS
+					dim e as XmlNode
+					e.Type = "error"
+					e.Value = "Don't know how to parse: " & xml
+					xml = ""
+					node.Children.Push(e)
+					Exit Sub
+				
+				end if
+				
+			else
+				' <element>, </element> or <element /> or <?pi?>
+				dim k as integer = xml.Find(">")
+				dim t as string = xml.GetSubstring(1, k - 1)
+				xml.Erase(0, k + 1)
+				
+				dim isPi as boolean = false
+				dim isOpen as boolean = false
+				dim isClose as boolean = false
+				      
+				if ch = "?" then
+					' <?pi .. ?>
+					isPi = true
+					isOpen = true
+					isClose = true
+					t = t.GetSubstring(1, Len(t)-2)
+				elseif ch = "/" then
+					' </endTag>
+					isClose = true
+					t.Erase(0, 1)
+				elseif t.Right(1) = "/" then
+					' <containedTag .. />
+					isOpen = true
+					isClose = true
+					t.Erase(t.Length - 1, 1)
+				else
+					' <startTag ..>
+					isOpen = true
+				end if
+				
+				t.Trim()
+
+				'println "found element(" & k & ")(open: " & isOpen & ", close: " & isClose & ", pi: " & isPi & ") = " & t
+				
+				dim n as XmlNode
+				if isPi then
+					n.Type = "processing-instruction"
+				else
+					n.Type = "element"
+				end if
+				'n.Value = t
+				
+				if isOpen then
+
+					' parse the tag body
+					dim el as string
+					dim attrs as string
+					ParseXmlTagBody(t, el, attrs)
+					n.Name = el
+				
+					' parse attributes
+					n.Attributes = ParseXmlAttributes(attrs)
+				
+					' recurse?
+					if not isClose then
+						ParseNextXmlNode(xml, n, ignoreWhitespace, ignoreAdvanced)
+					end if
+					
+					if not (ignoreAdvanced and n.Type <> "element") then
+						node.Children.Push(n)
+					end if
+					
+				elseif not isOpen and isClose then
+					Exit Sub
+				end if
+
+			end if
+		else
+			' trailing text
+			dim t as string = xml
+			'println "found text(" & j & ") = " & t
+			xml = ""
+			
+			dim tx as XmlNode
+			tx.Type = "text"
+			tx.Value = XmlUnescape(t)
+			if (IsWhitespace(t)) then
+				tx.Type = "whitespace"
+				if not ignoreWhitespace	then node.Children.Push(tx)				
+			else
+				node.Children.Push(tx)
+			end if
+	
+		end if
+
+		length = Len(xml)
+		iterateEscape = iterateEscape + 1
+
+	loop
+
+end sub
+
+function IsWhitespace(t as string) as Boolean
+
+	'if ch = " " or ch = "\r" or ch = "\n" or ch = "\t"
+	t.Trim()
+	
+	if t.Length = 0 then
+		IsWhitespace = true
+	else
+		IsWhitespace = false
+	end if
+
+end function
+
+sub ParseXmlTagBody(byval body as string, byref element as string, byref attrs as string)
+
+	element = ""
+	attrs = ""
+
+	dim i as integer	
+	dim endPos as integer = -1
+	
+	body.Trim()
+	
+	for i = 0 to body.Length - 1
+		dim ch as string = body.GetChar(i)
+		if IsWhitespace(ch) then
+			endPos = i
+			exit for
+		end if
+	next
+
+	if (endPos > 0) then
+	
+		element = body.GetSubstring(0, endPos)
+		element.Trim()
+		
+		attrs = body.GetSubstring(endPos, body.Length - endPos)
+		attrs.Trim()
+		
+	else
+	
+		element = body
+		
+	end if
+
+end sub
+
+function ParseXmlAttributes(byval body as string) as StringMap
+
+	dim i as integer
+	dim j as integer
+	
+	'println "\n\r-------parsing attributes: [" & body & "]"
+	
+	do while body.Length > 0
+
+		body.Trim()
+		'println "body is [" & body & "]"
+	
+		' find the = char that ends the attribute name
+		j = body.Find("=")
+		if j < 0 then Exit Do ' stop parsing if not found
+		
+		' extract the attribute name and erase all characters up till and including the =
+		dim key as string = body.GetSubstring(0, j)
+		key.Trim()
+		body.Erase(0, j + 1)
+		'println "  found key=[" & key & "] @ " & j
+		'println "body is [" & body & "]"
+		
+		' find the " character that starts the attribute value
+		j = body.Find("\"")
+		if j < 0 then Exit Do ' stop parsing if not found
+		
+		' remove all up till and including the "
+		body.Erase(0, j+1)
+		
+		' find the ending " character
+		j = body.Find("\"")
+		if j < 0 then Exit Do ' stop parsing if not found
+
+		' extract the attribute value and erase all characters up till and including the ending "
+		dim value as string = body.GetSubstring(0, j)
+		body.Erase(0, j+1)
+	
+		' add attribute
+		ParseXmlAttributes[key] = XmlUnescape(value)
+		
+	loop
+
+end function
+
+function DumpXmlNode(byref node as XmlNode, indent as string) as string
+
+	dim out as string = ""
+	dim CRLF as string = chr(13) & chr(10)
+	
+	if (node.Type = "cdata") or (node.Type = "text") or (node.Type = "whitespace") or (node.Type = "comment") or (node.Type = "error") then
+		out = out & indent & "[" & node.Type & "] = '" & node.Value & "'" & CRLF
+	else
+		out = out & indent & "[" & node.Type & "](" & node.Name & ")"
+		dim keys as array[string]
+		node.Attributes.GetKeys(keys)
+		for i = keys.LBound to keys.UBound			
+			out = out & " @" & keys[i] & "='" & node.Attributes[keys[i]] & "'"
+		next
+		out = out & CRLF
+	end if
+	
+	dim nindent = indent & "  "
+	for i = node.Children.LBound to node.Children.UBound
+		out = out & DumpXmlNode(node.Children[i], nindent)
+	next
+	DumpXmlNode = out
+
+end function
+
+function XmlUnescape(s as string) as string
+
+	dim v as string = ""
+	dim i as integer
+	do while s.Length > 0
+		dim j as integer = s.Find("&")
+		if (j < 0) then
+			v = v & s
+			Exit Do
+		else
+			v = v & s.GetSubstring(0, j)
+			s.Erase(0, j)
+			j = s.Find(";")
+			if (j < 0) then
+				' ERROR: let's just leave it as-is
+				v = v & "&" & s
+				Exit Do
+			else
+				dim e as string = s.GetSubstring(1, j-1)
+				s.Erase(0, j+1)
+				v = v & TranslateXmlEntity(e)
+			end if
+		end if
+	loop
+	XmlUnescape = v	
+	
+end function
+
+dim XmlEntities as StringMap
+dim IsXmlEntitiesInitialized as Boolean = false
+
+sub InitializeXmlEntities()
+
+	' This list is not complete, and is probably based more on HTML
+	' than on actual XML entities..
+	
+	XmlEntities["quot"] = "\""
+	XmlEntities["amp"] = "&"
+	XmlEntities["apos"] = "'"
+	XmlEntities["lt"] = "<"
+	XmlEntities["gt"] = ">"
+	XmlEntities["nbsp"] = ""
+	XmlEntities["iexcl"] = "¡"
+	XmlEntities["cent"] = "¢"
+	XmlEntities["pound"] = "£"
+	XmlEntities["curren"] = "¤"
+	XmlEntities["yen"] = "¥"
+	XmlEntities["brvbar"] = "¦"
+	XmlEntities["sect"] = "§"
+	XmlEntities["uml"] = "¨"
+	XmlEntities["copy"] = "©"
+	XmlEntities["ordf"] = "ª"
+	XmlEntities["laquo"] = "«"
+	XmlEntities["not"] = "¬"
+	XmlEntities["shy"] = ""
+	XmlEntities["reg"] = "®"
+	XmlEntities["macr"] = "¯"
+	XmlEntities["deg"] = "°"
+	XmlEntities["plusmn"] = "±"
+	XmlEntities["sup2"] = "²"
+	XmlEntities["sup3"] = "³"
+	XmlEntities["acute"] = "´"
+	XmlEntities["micro"] = "µ"
+	XmlEntities["para"] = "¶"
+	XmlEntities["middot"] = "·"
+	XmlEntities["cedil"] = "¸"
+	XmlEntities["sup1"] = "¹"
+	XmlEntities["ordm"] = "º"
+	XmlEntities["raquo"] = "»"
+	XmlEntities["frac14"] = "¼"
+	XmlEntities["frac12"] = "½"
+	XmlEntities["frac34"] = "¾"
+	XmlEntities["iquest"] = "¿"
+	XmlEntities["Agrave"] = "À"
+	XmlEntities["Aacute"] = "Á"
+	XmlEntities["Acirc"] = "Â"
+	XmlEntities["Atilde"] = "Ã"
+	XmlEntities["Auml"] = "Ä"
+	XmlEntities["Aring"] = "Å"
+	XmlEntities["AElig"] = "Æ"
+	XmlEntities["Ccedil"] = "Ç"
+	XmlEntities["Egrave"] = "È"
+	XmlEntities["Eacute"] = "É"
+	XmlEntities["Ecirc"] = "Ê"
+	XmlEntities["Euml"] = "Ë"
+	XmlEntities["Igrave"] = "Ì"
+	XmlEntities["Iacute"] = "Í"
+	XmlEntities["Icirc"] = "Î"
+	XmlEntities["Iuml"] = "Ï"
+	XmlEntities["ETH"] = "Ð"
+	XmlEntities["Ntilde"] = "Ñ"
+	XmlEntities["Ograve"] = "Ò"
+	XmlEntities["Oacute"] = "Ó"
+	XmlEntities["Ocirc"] = "Ô"
+	XmlEntities["Otilde"] = "Õ"
+	XmlEntities["Ouml"] = "Ö"
+	XmlEntities["times"] = "×"
+	XmlEntities["Oslash"] = "Ø"
+	XmlEntities["Ugrave"] = "Ù"
+	XmlEntities["Uacute"] = "Ú"
+	XmlEntities["Ucirc"] = "Û"
+	XmlEntities["Uuml"] = "Ü"
+	XmlEntities["Yacute"] = "Ý"
+	XmlEntities["THORN"] = "Þ"
+	XmlEntities["szlig"] = "ß"
+	XmlEntities["agrave"] = "à"
+	XmlEntities["aacute"] = "á"
+	XmlEntities["acirc"] = "â"
+	XmlEntities["atilde"] = "ã"
+	XmlEntities["auml"] = "ä"
+	XmlEntities["aring"] = "å"
+	XmlEntities["aelig"] = "æ"
+	XmlEntities["ccedil"] = "ç"
+	XmlEntities["egrave"] = "è"
+	XmlEntities["eacute"] = "é"
+	XmlEntities["ecirc"] = "ê"
+	XmlEntities["euml"] = "ë"
+	XmlEntities["igrave"] = "ì"
+	XmlEntities["iacute"] = "í"
+	XmlEntities["icirc"] = "î"
+	XmlEntities["iuml"] = "ï"
+	XmlEntities["eth"] = "ð"
+	XmlEntities["ntilde"] = "ñ"
+	XmlEntities["ograve"] = "ò"
+	XmlEntities["oacute"] = "ó"
+	XmlEntities["ocirc"] = "ô"
+	XmlEntities["otilde"] = "õ"
+	XmlEntities["ouml"] = "ö"
+	XmlEntities["divide"] = "÷"
+	XmlEntities["oslash"] = "ø"
+	XmlEntities["ugrave"] = "ù"
+	XmlEntities["uacute"] = "ú"
+	XmlEntities["ucirc"] = "û"
+	XmlEntities["uuml"] = "ü"
+	XmlEntities["yacute"] = "ý"
+	XmlEntities["thorn"] = "þ"
+	XmlEntities["yuml"] = "ÿ"
+	XmlEntities["OElig"] = "Œ"
+	XmlEntities["oelig"] = "œ"
+	XmlEntities["Scaron"] = "Š"
+	XmlEntities["scaron"] = "š"
+	XmlEntities["Yuml"] = "Ÿ"
+	XmlEntities["fnof"] = "ƒ"
+	XmlEntities["circ"] = "ˆ"
+	XmlEntities["tilde˜"] = ""
+	XmlEntities["Alpha"] = "?"
+	XmlEntities["Beta"] = "?"
+	XmlEntities["Gamma"] = "G"
+	XmlEntities["Delta"] = "?"
+	XmlEntities["Epsilon"] = "?"
+	XmlEntities["Zeta"] = "?"
+	XmlEntities["Eta"] = "?"
+	XmlEntities["Theta"] = "T"
+	XmlEntities["Iota"] = "?"
+	XmlEntities["Kappa"] = "?"
+	XmlEntities["Lambda"] = "?"
+	XmlEntities["Mu"] = "?"
+	XmlEntities["Nu"] = "?"
+	XmlEntities["Xi"] = "?"
+	XmlEntities["Omicron"] = "?"
+	XmlEntities["Pi"] = "?"
+	XmlEntities["Rho"] = "?"
+	XmlEntities["Sigma"] = "S"
+	XmlEntities["Tau"] = "?"
+	XmlEntities["Upsilon"] = "?"
+	XmlEntities["Phi"] = "F"
+	XmlEntities["Chi"] = "?"
+	XmlEntities["Psi"] = "?"
+	XmlEntities["Omega"] = "O"
+	XmlEntities["alpha"] = "a"
+	XmlEntities["beta"] = "ß"
+	XmlEntities["gamma"] = "?"
+	XmlEntities["delta"] = "d"
+	XmlEntities["epsilon"] = "e"
+	XmlEntities["zeta"] = "?"
+	XmlEntities["eta"] = "?"
+	XmlEntities["theta"] = "?"
+	XmlEntities["iota"] = "?"
+	XmlEntities["kappa"] = "?"
+	XmlEntities["lambda"] = "?"
+	XmlEntities["mu"] = "µ"
+	XmlEntities["nu"] = "?"
+	XmlEntities["xi"] = "?"
+	XmlEntities["omicron"] = "?"
+	XmlEntities["pi"] = "p"
+	XmlEntities["rho"] = "?"
+	XmlEntities["sigmaf"] = "?"
+	XmlEntities["sigma"] = "s"
+	XmlEntities["tau"] = "t"
+	XmlEntities["upsilon"] = "?"
+	XmlEntities["phi"] = "f"
+	XmlEntities["chi"] = "?"
+	XmlEntities["psi"] = "?"
+	XmlEntities["omega"] = "?"
+	XmlEntities["thetasym"] = "?"
+	XmlEntities["upsih"] = "?"
+	XmlEntities["piv"] = "?"
+	XmlEntities["ensp"] = " "
+	XmlEntities["emsp"] = " "
+	XmlEntities["thinsp"] = "?"
+	XmlEntities["zwnj"] = ""
+	XmlEntities["zwj"] = ""
+	XmlEntities["ndash"] = "–"
+	XmlEntities["mdash"] = "—"
+	XmlEntities["lsquo"] = "‘"
+	XmlEntities["rsquo"] = "’"
+	XmlEntities["sbquo"] = "‚"
+	XmlEntities["ldquo"] = "“"
+	XmlEntities["rdquo"] = "”"
+	XmlEntities["bdquo"] = "„"
+	XmlEntities["dagger"] = "†"
+	XmlEntities["Dagger"] = "‡"
+	XmlEntities["bull"] = "•"
+	XmlEntities["hellip"] = "…"
+	XmlEntities["permil"] = "‰"
+	XmlEntities["prime"] = "'"
+	XmlEntities["Prime"] = "?"
+	XmlEntities["lsaquo"] = "‹"
+	XmlEntities["rsaquo"] = "›"
+	XmlEntities["oline"] = "?"
+	XmlEntities["frasl"] = "/"
+	XmlEntities["euro"] = "€"
+	XmlEntities["image"] = "I"
+	XmlEntities["weierp"] = "P"
+	XmlEntities["real"] = "R"
+	XmlEntities["trade"] = "™"
+	XmlEntities["alefsym"] = "?"
+	XmlEntities["larr"] = "?"
+	XmlEntities["uarr"] = "?"
+	XmlEntities["rarr"] = "?"
+	XmlEntities["darr"] = "?"
+	XmlEntities["harr"] = "?"
+	XmlEntities["crarr"] = "?"
+	XmlEntities["lArr"] = "?"
+	XmlEntities["uArr"] = "?"
+	XmlEntities["rArr"] = "?"
+	XmlEntities["dArr"] = "?"
+	XmlEntities["hArr"] = "?"
+	XmlEntities["forall"] = "?"
+	XmlEntities["part"] = "?"
+	XmlEntities["exist"] = "?"
+	XmlEntities["empty"] = "Ø"
+	XmlEntities["nabla"] = "?"
+	XmlEntities["isin"] = "?"
+	XmlEntities["notin"] = "?"
+	XmlEntities["ni"] = "?"
+	XmlEntities["prod"] = "?"
+	XmlEntities["sum"] = "?"
+	XmlEntities["minus"] = "-"
+	XmlEntities["lowast"] = "*"
+	XmlEntities["radic"] = "v"
+	XmlEntities["prop"] = "?"
+	XmlEntities["infin"] = "8"
+	XmlEntities["ang"] = "?"
+	XmlEntities["and"] = "?"
+	XmlEntities["or"] = "?"
+	XmlEntities["cap"] = "n"
+	XmlEntities["cup"] = "?"
+	XmlEntities["int"] = "?"
+	XmlEntities["there4"] = "?"
+	XmlEntities["sim"] = "~"
+	XmlEntities["cong"] = "?"
+	XmlEntities["asymp"] = "˜"
+	XmlEntities["ne"] = "?"
+	XmlEntities["equiv"] = "="
+	XmlEntities["le"] = "="
+	XmlEntities["ge"] = "="
+	XmlEntities["sub"] = "?"
+	XmlEntities["sup"] = "?"
+	XmlEntities["nsub"] = "?"
+	XmlEntities["sube"] = "?"
+	XmlEntities["supe"] = "?"
+	XmlEntities["oplus"] = "?"
+	XmlEntities["otimes"] = "?"
+	XmlEntities["perp"] = "?"
+	XmlEntities["sdot"] = "·"
+	XmlEntities["lceil"] = "?"
+	XmlEntities["rceil"] = "?"
+	XmlEntities["lfloor"] = "?"
+	XmlEntities["rfloor"] = "?"
+	XmlEntities["lang"] = "<"
+	XmlEntities["rang"] = ">"
+	XmlEntities["loz"] = "?"
+	XmlEntities["spades"] = "?"
+	XmlEntities["clubs"] = "?"
+	XmlEntities["hearts"] = "?"
+	XmlEntities["diams"] = "?"
+
+	IsXmlEntitiesInitialized = true
+
+end sub
+
+function TranslateXmlEntity(e as string) as string
+
+	if not IsXmlEntitiesInitialized then InitializeXmlEntities()
+
+	if e.Match("^#x") then
+
+		'&#x1234; hex charcode entity
+		e.Erase(0, 2)
+		dim cc as integer = HexToInt(e)
+		TranslateXmlEntity = Chr(cc)
+
+	elseif e.Match("^#\\d") then
+
+		'&#12345; decimal charcode entity
+		e.Erase(0, 1)
+		dim cc as integer = CInt(e)
+		TranslateXmlEntity = Chr(cc)
+
+	elseif XmlEntities.ContainsKey(e) then
+
+		TranslateXmlEntity = XmlEntities[e]
+
+	else
+
+		TranslateXmlEntity = "?" ' ERROR
+
+	end if
+	
+end function
+
+function FindElement(byref node as XmlNode, elementName as string) as XmlNode
+
+	dim all as Array[XmlNode] = FindElements(node, elementName)
+	if all.Size = 0 then
+		FindElement.Type = "none"
+	else
+		FindElement = all[0]
+	end if
+
+end function
+
+function FindElement(byref node as XmlNode, elementName as string, attributeName as string, attributeValue as string) as XmlNode
+
+	dim all as Array[XmlNode] = FindElements(node, elementName, attributeName, attributeValue)
+	if all.Size = 0 then
+		FindElement.Type = "none"
+	else
+		FindElement = all[0]
+	end if
+
+end function
+
+function FindElements(byref node as XmlNode, elementName as string) as Array[XmlNode]
+
+	dim all as Array[XmlNode]
+	dim i as integer
+	for i = node.Children.LBound to node.Children.UBound
+		if (node.Children[i].Type = "element" and node.Children[i].Name = elementName) then
+			all.Push( node.Children[i] )
+		end if
+	next
+	FindElements = all
+
+end function
+
+function FindElements(byref node as XmlNode, elementName as string, attributeName as string, attributeValue as string) as Array[XmlNode]
+
+	dim all as Array[XmlNode]
+	dim i as integer
+	for i = node.Children.LBound to node.Children.UBound
+		dim c as XmlNode = node.Children[i]
+		if (c.Type = "element") and (c.Name = elementName) and (c.Attributes[attributeName] = attributeValue) then
+			all.Push( node.Children[i] )
+		end if
+	next
+	FindElements = all
+
+end function
+
+function FlattenElement(byref node as XmlNode) as String
+
+	if (node.Type == "text" or node.Type == "cdata") then
+		FlattenElement = node.Value
+	else
+		dim s as string
+		dim i as integer
+		for i = node.Children.LBound to node.Children.UBound
+			s = s & FlattenElement(node.Children[i])
+		next i
+		FlattenElement = s
+	end if
+
+end function
+
+function HexToInt(byval hexStr as String) as Integer
+
+	dim hexChars as string = "0123456789abcdef"
+	dim s as string = hexStr
+	s.MakeLower()
+	dim value as integer = 0
+	dim i as integer
+	for i = 0 to s.Length-1
+		dim ch as string = s.GetChar(i)
+		value = (value * 16) + hexChars.Find(ch)
+	next	
+	
+	HexToInt = value
+	
+end function
+
