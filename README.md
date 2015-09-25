@@ -2,7 +2,7 @@
 
 A XML DOM-like parser implemented in VSL (Viz3 scripting language)
 
-Implemented by Rune Bjerke [rune ÄT never DÖT no] (rune @ Vizrt forums)
+Implemented by Rune Bjerke (rune ÄT never DÖT no, or: rune @ Vizrt forums)
 
 Version 1.0 - 2015-09-25
 
